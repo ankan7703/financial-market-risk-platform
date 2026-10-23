@@ -34,19 +34,39 @@ FEATURES = [
     "volume_change",
 ]
 
-TARGET = "target_next_day_volatility"
+TARGET = "target_next_day_abs_return"
+VALIDATION_FRACTION = 0.20
+
+
+def calculate_metrics(y_true, predictions):
+    return {
+        "mae": mean_absolute_error(y_true, predictions),
+        "rmse": np.sqrt(mean_squared_error(y_true, predictions)),
+    }
 
 
 def main():
     df = pd.read_csv(DATA_PATH, index_col=0, parse_dates=True)
     df = df.sort_index()
 
-    # Keep the final 20% out of this training run.
-    split_idx = int(len(df) * 0.80)
-    development = df.iloc[:split_idx]
+    # Remove rows with missing model inputs or target.
+    df = df.dropna(subset=FEATURES + [TARGET])
 
-    X = development[FEATURES]
-    y = development[TARGET]
+    # Reserve the final 20% for final evaluation.
+    final_split_idx = int(len(df) * 0.80)
+    development = df.iloc[:final_split_idx]
+
+    # Use the latest 20% of development data for validation.
+    validation_split_idx = int(len(development) * 0.80)
+
+    train = development.iloc[:validation_split_idx]
+    validation = development.iloc[validation_split_idx:]
+
+    X_train = train[FEATURES]
+    y_train = train[TARGET]
+
+    X_validation = validation[FEATURES]
+    y_validation = validation[TARGET]
 
     model = RandomForestRegressor(
         n_estimators=200,
@@ -56,31 +76,43 @@ def main():
         n_jobs=-1,
     )
 
-    # Store MLflow tracking data inside the project
-    # Use a SQLite database for local experiment tracking
-    MLFLOW_DIR = PROJECT_ROOT / "mlruns"
-    MLFLOW_DIR.mkdir(parents=True, exist_ok=True)
-
-    MLFLOW_DB = MLFLOW_DIR / "mlflow.db"
+    mlflow_dir = PROJECT_ROOT / "mlruns"
+    mlflow_dir.mkdir(parents=True, exist_ok=True)
+    mlflow_db = mlflow_dir / "mlflow.db"
 
     mlflow.set_tracking_uri(
-        f"sqlite:///{MLFLOW_DB.as_posix()}"
+        f"sqlite:///{mlflow_db.as_posix()}"
     )
-
     mlflow.set_experiment("financial-market-risk")
-    
-    with mlflow.start_run():
-        model.fit(X, y)
-        predictions = model.predict(X)
 
-        # These are training metrics, NOT generalization metrics.
-        train_mae = mean_absolute_error(y, predictions)
-        train_rmse = np.sqrt(mean_squared_error(y, predictions))
+    with mlflow.start_run():
+        model.fit(X_train, y_train)
+
+        train_predictions = model.predict(X_train)
+        validation_predictions = model.predict(X_validation)
+
+        train_metrics = calculate_metrics(
+            y_train, train_predictions
+        )
+        validation_metrics = calculate_metrics(
+            y_validation, validation_predictions
+        )
 
         mlflow.log_params(model.get_params())
-        mlflow.log_metric("train_mae", train_mae)
-        mlflow.log_metric("train_rmse", train_rmse)
+        mlflow.log_param("feature_count", len(FEATURES))
+        mlflow.log_param("training_rows", len(train))
+        mlflow.log_param("validation_rows", len(validation))
+        mlflow.log_param("target", TARGET)
 
+        mlflow.log_metrics({
+            "train_mae": train_metrics["mae"],
+            "train_rmse": train_metrics["rmse"],
+            "validation_mae": validation_metrics["mae"],
+            "validation_rmse": validation_metrics["rmse"],
+        })
+
+        # Save this validation-stage model for now.
+        # We will finalize model selection before deployment.
         artifact = {
             "model": model,
             "features": FEATURES,
@@ -90,12 +122,18 @@ def main():
 
         model_path = MODEL_DIR / "risk_model.joblib"
         joblib.dump(artifact, model_path)
-
         mlflow.log_artifact(str(model_path))
 
-        print("Training complete.")
-        print(f"Training MAE: {train_mae:.6f}")
-        print(f"Training RMSE: {train_rmse:.6f}")
+        print("Training and validation complete.")
+        print(f"Training period: {train.index.min()} to {train.index.max()}")
+        print(
+            f"Validation period: "
+            f"{validation.index.min()} to {validation.index.max()}"
+        )
+        print(f"Training MAE: {train_metrics['mae']:.6f}")
+        print(f"Training RMSE: {train_metrics['rmse']:.6f}")
+        print(f"Validation MAE: {validation_metrics['mae']:.6f}")
+        print(f"Validation RMSE: {validation_metrics['rmse']:.6f}")
         print(f"Saved model: {model_path}")
 
 

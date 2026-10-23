@@ -14,4 +14,4 @@ COPY data/processed/ ./data/processed/
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["sh", "-c", "streamlit run dashboard/app.py --server.address=0.0.0.0 --server.port ${PORT:-8501}"]
